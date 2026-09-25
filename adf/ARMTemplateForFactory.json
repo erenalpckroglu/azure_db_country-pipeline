@@ -1,0 +1,537 @@
+{
+  "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "metadata": "Data Factory name",
+      "defaultValue": "<data-factory>"
+    },
+    "absteam03_connectionString": {
+      "type": "secureString",
+      "metadata": "Secure string for 'connectionString' of 'absteam03'"
+    },
+    "ls_function_clean_functionKey": {
+      "type": "secureString",
+      "metadata": "Secure string for 'functionKey' of 'ls_function_clean'"
+    },
+    "httpsvteam03_humdata_properties_typeProperties_url": {
+      "type": "string",
+      "defaultValue": "https://data.humdata.org/dataset/4fdcd4dc-5c2f-43af-a1e4-93c9b6539a27/resource/12d7c8e3-eff9-4db0-93b7-726825c4fe9a/download/wfpvam_foodprices.csv"
+    },
+    "ls_function_clean_properties_typeProperties_functionAppUrl": {
+      "type": "string",
+      "defaultValue": "https://<redacted>.azurewebsites.net"
+    }
+  },
+  "variables": {
+    "factoryId": "[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/pl_ingest_raw')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "activities": [
+          {
+            "name": "Copy data1",
+            "type": "Copy",
+            "dependsOn": [],
+            "policy": {
+              "timeout": "0.12:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "userProperties": [],
+            "typeProperties": {
+              "source": {
+                "type": "DelimitedTextSource",
+                "storeSettings": {
+                  "type": "HttpReadSettings",
+                  "requestMethod": "GET"
+                },
+                "formatSettings": {
+                  "type": "DelimitedTextReadSettings"
+                }
+              },
+              "sink": {
+                "type": "DelimitedTextSink",
+                "storeSettings": {
+                  "type": "AzureBlobStorageWriteSettings"
+                },
+                "formatSettings": {
+                  "type": "DelimitedTextWriteSettings",
+                  "quoteAllText": true,
+                  "fileExtension": ".txt"
+                }
+              },
+              "enableStaging": false,
+              "translator": {
+                "type": "TabularTranslator",
+                "mappings": [
+                  {
+                    "source": {
+                      "name": "adm0_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "adm0_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "adm0_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "adm0_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "adm1_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "adm1_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "adm1_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "adm1_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "mkt_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "mkt_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "mkt_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "mkt_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "cm_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "cm_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "cm_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "cm_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "cur_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "cur_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "cur_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "cur_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "pt_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "pt_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "pt_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "pt_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "um_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "um_id",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "um_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "um_name",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "mp_month",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "mp_month",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "mp_year",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "mp_year",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "mp_price",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "mp_price",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  },
+                  {
+                    "source": {
+                      "name": "mp_commoditysource",
+                      "type": "String",
+                      "physicalType": "String"
+                    },
+                    "sink": {
+                      "name": "mp_commoditysource",
+                      "type": "String",
+                      "physicalType": "String"
+                    }
+                  }
+                ],
+                "typeConversion": true,
+                "typeConversionSettings": {
+                  "allowDataTruncation": true,
+                  "treatBooleanAsNumber": false
+                }
+              }
+            },
+            "inputs": [
+              {
+                "referenceName": "ds_http_humdata",
+                "type": "DatasetReference",
+                "parameters": {}
+              }
+            ],
+            "outputs": [
+              {
+                "referenceName": "ds_blob_rawhumdata_global",
+                "type": "DatasetReference",
+                "parameters": {
+                  "fileName": "@concat('global_', formatDateTime(utcnow(), 'yyyyMMdd'), '.csv')"
+                }
+              }
+            ]
+          },
+          {
+            "name": "Call_Clean_Pipeline",
+            "type": "AzureFunctionActivity",
+            "dependsOn": [
+              {
+                "activity": "Copy data1",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "0.12:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "userProperties": [],
+            "typeProperties": {
+              "functionName": "clean_pipeline",
+              "headers": {},
+              "method": "GET"
+            },
+            "linkedServiceName": {
+              "referenceName": "ls_function_clean",
+              "type": "LinkedServiceReference"
+            }
+          }
+        ],
+        "policy": {
+          "elapsedTimeMetric": {}
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-09-20T16:15:22Z"
+      },
+      "dependsOn": [
+        "[concat(variables('factoryId'), '/datasets/ds_http_humdata')]",
+        "[concat(variables('factoryId'), '/datasets/ds_blob_rawhumdata_global')]",
+        "[concat(variables('factoryId'), '/linkedServices/ls_function_clean')]"
+      ]
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/ds_http_humdata')]",
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "linkedServiceName": {
+          "referenceName": "httpsvteam03_humdata",
+          "type": "LinkedServiceReference"
+        },
+        "annotations": [],
+        "type": "DelimitedText",
+        "typeProperties": {
+          "location": {
+            "type": "HttpServerLocation"
+          },
+          "columnDelimiter": ",",
+          "escapeChar": "\\",
+          "firstRowAsHeader": true,
+          "quoteChar": "\""
+        },
+        "schema": []
+      },
+      "dependsOn": [
+        "[concat(variables('factoryId'), '/linkedServices/httpsvteam03_humdata')]"
+      ]
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/ds_blob_rawhumdata_global')]",
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "linkedServiceName": {
+          "referenceName": "absteam03",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "fileName": {
+            "type": "string"
+          }
+        },
+        "annotations": [],
+        "type": "DelimitedText",
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobStorageLocation",
+            "fileName": {
+              "value": "@dataset().fileName",
+              "type": "Expression"
+            },
+            "container": "raw"
+          },
+          "columnDelimiter": ",",
+          "escapeChar": "\\",
+          "firstRowAsHeader": true,
+          "quoteChar": "\""
+        },
+        "schema": []
+      },
+      "dependsOn": [
+        "[concat(variables('factoryId'), '/linkedServices/absteam03')]"
+      ]
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/ds_test')]",
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "linkedServiceName": {
+          "referenceName": "absteam03",
+          "type": "LinkedServiceReference"
+        },
+        "annotations": [],
+        "type": "DelimitedText",
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobStorageLocation",
+            "fileName": "global_raw_small.csv",
+            "container": "raw"
+          },
+          "columnDelimiter": ",",
+          "escapeChar": "\\",
+          "firstRowAsHeader": true,
+          "quoteChar": "\""
+        },
+        "schema": []
+      },
+      "dependsOn": [
+        "[concat(variables('factoryId'), '/linkedServices/absteam03')]"
+      ]
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/absteam03')]",
+      "type": "Microsoft.DataFactory/factories/linkedServices",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "annotations": [],
+        "type": "AzureBlobStorage",
+        "typeProperties": {
+          "connectionString": "<redacted>"
+        }
+      },
+      "dependsOn": []
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/httpsvteam03_humdata')]",
+      "type": "Microsoft.DataFactory/factories/linkedServices",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "description": "https://data.humdata.org/dataset/global-wfp-food-prices/resource/502190c6-0d3d-4b84-977e-ef062f053662",
+        "annotations": [],
+        "type": "HttpServer",
+        "typeProperties": {
+          "url": "[parameters('httpsvteam03_humdata_properties_typeProperties_url')]",
+          "enableServerCertificateValidation": true,
+          "authenticationType": "Anonymous"
+        }
+      },
+      "dependsOn": []
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/ls_function_clean')]",
+      "type": "Microsoft.DataFactory/factories/linkedServices",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "annotations": [],
+        "type": "AzureFunction",
+        "typeProperties": {
+          "functionAppUrl": "[parameters('ls_function_clean_properties_typeProperties_functionAppUrl')]",
+          "authentication": "Anonymous",
+          "functionKey": {
+            "type": "SecureString",
+            "value": "<redacted>"
+          }
+        }
+      },
+      "dependsOn": []
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/trigger_every15th_monthly')]",
+      "type": "Microsoft.DataFactory/factories/triggers",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "annotations": [],
+        "runtimeState": "Started",
+        "pipelines": [
+          {
+            "pipelineReference": {
+              "referenceName": "pl_ingest_raw",
+              "type": "PipelineReference"
+            },
+            "parameters": {}
+          }
+        ],
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+          "recurrence": {
+            "frequency": "Month",
+            "interval": 1,
+            "startTime": "2026-09-21T09:34:00",
+            "timeZone": "W. Europe Standard Time",
+            "schedule": {
+              "minutes": [
+                0
+              ],
+              "hours": [
+                1
+              ],
+              "monthDays": [
+                15
+              ]
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[concat(variables('factoryId'), '/pipelines/pl_ingest_raw')]"
+      ]
+    }
+  ]
+}

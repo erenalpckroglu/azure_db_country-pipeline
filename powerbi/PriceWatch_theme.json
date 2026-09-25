@@ -1,0 +1,23 @@
+{
+  "name": "PriceWatch GM-GW",
+  "dataColors": [
+    "#3B82F6",
+    "#1E3A5F",
+    "#94A3B8",
+    "#CBD5E1",
+    "#64748B",
+    "#0F172A",
+    "#93C5FD",
+    "#475569"
+  ],
+  "background": "#FFFFFF",
+  "foreground": "#1E293B",
+  "tableAccent": "#3B82F6",
+  "good": "#16A34A",
+  "bad": "#DC2626",
+  "neutral": "#94A3B8",
+  "maximum": "#1E3A5F",
+  "center": "#94A3B8",
+  "minimum": "#3B82F6",
+  "null": "#CBD5E1"
+}

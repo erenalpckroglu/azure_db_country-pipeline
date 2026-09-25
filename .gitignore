@@ -1,0 +1,38 @@
+# ---- Secrets: never commit ----
+local.settings.json
+.env
+*.env
+*.publishsettings
+adf/**/ARMTemplateParametersForFactory.json
+adf/**/*parameters*.json
+
+# ---- Large data ----
+data/raw/
+*.bacpac
+
+# ---- Power BI report (contains database connection details) ----
+*.pbix
+
+# ---- Python / Azure Functions local artifacts ----
+.venv/
+venv/
+__pycache__/
+*.pyc
+.python_packages/
+.pytest_cache/
+__azurite_db*__.json
+__blobstorage__
+__queuestorage__
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.bak
+
+# ---- Office temp files ----
+~$*
+
+# ---- Local helper tools (removed after setup) ----
+.repo_tools/
