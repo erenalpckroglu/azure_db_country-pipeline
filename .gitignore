@@ -6,8 +6,10 @@ local.settings.json
 adf/**/ARMTemplateParametersForFactory.json
 adf/**/*parameters*.json
 
-# ---- Large data ----
+# ---- Large data (the repository keeps the Parquet files) ----
 data/raw/
+data/curated/*.csv
+data/filtered/*.csv
 *.bacpac
 
 # ---- Power BI report (contains database connection details) ----
@@ -33,6 +35,3 @@ Thumbs.db
 
 # ---- Office temp files ----
 ~$*
-
-# ---- Local helper tools (removed after setup) ----
-.repo_tools/

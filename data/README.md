@@ -5,13 +5,16 @@ before the Azure subscription was closed.
 
 | Folder | Content | In git |
 |---|---|---|
-| `curated/` | `price_clean` and `excluded_records` from Azure SQL, as Parquet and CSV | yes |
+| `curated/` | `price_clean` and `excluded_records` from Azure SQL, as Parquet | yes (CSV copies local only) |
 | `fx/` | Monthly exchange rates: `fx_rates_historical.csv`, `fx_rates_current.csv` | yes |
-| `filtered/` | Country-filtered snapshot written by the pipeline | yes |
+| `filtered/` | Country-filtered snapshot written by the pipeline, as Parquet | yes (CSV original local only) |
 | `raw/` | Latest raw source file (about 280 MB) | no, local only |
 
 For Power BI use `curated/price_clean.parquet`: numbers and dates keep their types,
 so there are no decimal-separator issues. See [`../powerbi/OFFLINE_SETUP.md`](../powerbi/OFFLINE_SETUP.md).
+
+`curated/price_clean` is the table the deployed function wrote, so it still contains one zero price
+(Fonio, Kaur Wharf Town, February 2017) that the current code excludes.
 
 ## `price_clean` columns
 

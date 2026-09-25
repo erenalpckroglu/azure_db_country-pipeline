@@ -1,17 +1,36 @@
-import azure.functions as func
-import logging
-import pandas as pd
-import requests
-import pymssql
-from azure.storage.blob import BlobServiceClient
-import os
-from datetime import datetime, timezone
+"""
+PriceWatch GM-GW - Azure Function: clean_pipeline
+
+Called by Azure Data Factory after the monthly raw file has been copied to Blob Storage.
+Filters The Gambia and Guinea-Bissau, removes duplicates and invalid prices, standardises
+units, converts prices to USD and writes the result to Azure SQL Database in one transaction.
+
+All configuration comes from environment variables (Function App settings in Azure,
+local.settings.json locally). No secrets are stored in this file.
+"""
 import io
+import logging
+import os
 import re
 import time
+from datetime import datetime, timezone
+
+import azure.functions as func
+import pandas as pd
+import pymssql
+import requests
+from azure.core.exceptions import ResourceNotFoundError
+from azure.storage.blob import BlobServiceClient
 
 app = func.FunctionApp()
 
+TARGET_COUNTRIES = ["Gambia", "Guinea-Bissau"]
+RAW_CONTAINER, FILTERED_CONTAINER, FX_CONTAINER = "raw", "filtered", "fxrates"
+RAW_FILE_PATTERN = re.compile(r"^global_\d{8}\.csv$")
+FX_API_URL = "https://api.frankfurter.dev/v2/rates"
+
+# Raw unit (um_name) -> (standard category, factor into the category's base unit).
+# Units that are not listed are excluded with a reason instead of being guessed.
 UNIT_MAP = {
     "KG": ("KG", 1.0),
     "125 G": ("KG", 0.125),
@@ -21,15 +40,36 @@ UNIT_MAP = {
     "Unit": ("Unit", 1.0),
 }
 
+# One observation: one price for a commodity, unit and price type in a market and month.
 BUSINESS_KEY_COLS = ["adm0_name", "adm1_name", "mkt_name", "cm_name", "pt_name", "um_name", "mp_month", "mp_year"]
 
+CLEAN_COLS = [
+    "adm0_name", "adm1_name", "mkt_name", "cm_name", "cur_name", "pt_name", "mp_month", "mp_year", "mp_price",
+    "um_name", "unit_category_calc", "price_per_std_unit_calc", "fx_rate_calc", "fx_rate_date_calc",
+    "price_usd_calc", "source_file",
+]
+EXCLUDED_COLS = [
+    "adm0_name", "adm1_name", "mkt_name", "cm_name", "cur_name", "pt_name", "mp_month", "mp_year", "mp_price",
+    "um_name", "reason", "source_file",
+]
 
-def connect_with_retry(autocommit=True, max_attempts=5, delay_seconds=12):
-    """
-    Connects to the serverless SQL Database, retrying on Azure's transient
-    error 40613 ("database is not currently available"), which occurs while
-    the database is mid-resume from auto-pause.
-    """
+INSERT_CLEAN_SQL = """
+    INSERT INTO price_clean
+        (adm0_name, adm1_name, mkt_name, cm_name, cur_name, pt_name, mp_month, mp_year, mp_price, um_name,
+         unit_category_calc, price_per_std_unit_calc, fx_rate_calc, fx_rate_date_calc, price_usd_calc, source_file)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+INSERT_EXCLUDED_SQL = """
+    INSERT INTO excluded_records
+        (adm0_name, adm1_name, mkt_name, cm_name, cur_name, pt_name, mp_month, mp_year, mp_price, um_name,
+         reason, source_file)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
+def connect_with_retry(autocommit: bool = True, max_attempts: int = 5, delay_seconds: int = 12):
+    """Connect to the serverless SQL Database, retrying while it resumes from auto-pause
+    (Azure answers with transient error 40613 until the database is available)."""
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
@@ -40,274 +80,212 @@ def connect_with_retry(autocommit=True, max_attempts=5, delay_seconds=12):
                 database=os.environ["SQL_DATABASE"],
                 autocommit=autocommit,
             )
-        except Exception as e:
+        except pymssql.Error as e:
             last_error = e
-            logging.info(f"SQL connect attempt {attempt}/{max_attempts} failed ({type(e).__name__}), retrying in {delay_seconds}s...")
+            logging.info("SQL connect attempt %d/%d failed (%s), retrying in %ds...",
+                         attempt, max_attempts, type(e).__name__, delay_seconds)
             time.sleep(delay_seconds)
     raise last_error
 
 
 def wake_up_sql() -> None:
-    """
-    Fires a trivial query early so the serverless SQL Database has time to
-    resume from auto-pause while the rest of the pipeline (download, filter,
-    clean) is still running.
-    """
+    """Send a trivial query early, so the database resumes while the rest of the pipeline runs."""
     try:
         conn = connect_with_retry(max_attempts=2, delay_seconds=5)
         conn.cursor().execute("SELECT 1")
         conn.close()
         logging.info("wake_up_sql: SQL Database is awake.")
-    except Exception:
-        logging.info("wake_up_sql: initial ping failed, continuing anyway - write_to_sql will retry on connect.")
+    except pymssql.Error:
+        logging.info("wake_up_sql: initial ping failed, continuing - write_to_sql retries on connect.")
 
 
 def update_fx_current(blob_service: BlobServiceClient) -> None:
-    fx_container = blob_service.get_container_client("fxrates")
+    """Append this month's live USD rates for GMD and XOF to fx_rates_current.csv.
+
+    Idempotent: if the month is already logged, nothing is fetched, so past months stay frozen.
+    Only a missing file starts a new log; any other read error fails the run instead of
+    overwriting the rate history.
+    """
+    container = blob_service.get_container_client(FX_CONTAINER)
     now = datetime.now(timezone.utc)
-    year, month = now.year, now.month
-
     try:
-        existing_bytes = fx_container.download_blob("fx_rates_current.csv").readall()
-        current_df = pd.read_csv(io.BytesIO(existing_bytes))
-    except Exception:
-        current_df = pd.DataFrame(columns=["year", "month", "currency", "rate_lcu_per_usd", "fetched_date", "source"])
+        current = pd.read_csv(io.BytesIO(container.download_blob("fx_rates_current.csv").readall()))
+    except ResourceNotFoundError:
+        current = pd.DataFrame(columns=["year", "month", "currency", "rate_lcu_per_usd", "fetched_date", "source"])
 
-    already_logged = ((current_df["year"] == year) & (current_df["month"] == month)).any()
-    if already_logged:
-        logging.info(f"FX rate for {year}-{month:02d} already logged, skipping fetch.")
+    if ((current["year"] == now.year) & (current["month"] == now.month)).any():
+        logging.info("FX rate for %d-%02d already logged, skipping fetch.", now.year, now.month)
         return
 
-    response = requests.get(
-        "https://api.frankfurter.dev/v2/rates",
-        params={"base": "USD", "quotes": "GMD,XOF"},
-        timeout=10,
-    )
+    response = requests.get(FX_API_URL, params={"base": "USD", "quotes": "GMD,XOF"}, timeout=10)
     response.raise_for_status()
-    records = response.json()
-
     new_rows = pd.DataFrame([
         {
-            "year": year,
-            "month": month,
+            "year": now.year,
+            "month": now.month,
             "currency": rec["quote"],
             "rate_lcu_per_usd": rec["rate"],
             "fetched_date": now.strftime("%Y-%m-%d"),
             "source": "frankfurter_latest",
         }
-        for rec in records
+        for rec in response.json()
     ])
-    current_df = pd.concat([current_df, new_rows], ignore_index=True)
+    updated = new_rows if current.empty else pd.concat([current, new_rows], ignore_index=True)
+    container.upload_blob(name="fx_rates_current.csv", data=updated.to_csv(index=False), overwrite=True)
+    logging.info("Logged FX rates for %d-%02d.", now.year, now.month)
 
-    buf = io.StringIO()
-    current_df.to_csv(buf, index=False)
-    fx_container.upload_blob(name="fx_rates_current.csv", data=buf.getvalue(), overwrite=True)
-    logging.info(f"Logged FX rates for {year}-{month:02d}.")
+
+def build_fx_lookup(historical: pd.DataFrame, live: pd.DataFrame | None = None) -> dict:
+    """Merge historical and live monthly rates into one lookup:
+    (year, month, currency) -> (local currency per USD, rate date). Live rates win on overlap."""
+    month_start = [f"{y}-{m:02d}-01" for y, m in zip(historical["year"], historical["month"], strict=True)]
+    frames = [historical.assign(rate_date=month_start)]
+    if live is not None and not live.empty:
+        frames.append(live.assign(rate_date=live["fetched_date"].astype(str)))
+    rates = pd.concat(frames, ignore_index=True).drop_duplicates(["year", "month", "currency"], keep="last")
+    return {
+        (int(y), int(m), c): (float(r), d)
+        for y, m, c, r, d in zip(
+            rates["year"], rates["month"], rates["currency"], rates["rate_lcu_per_usd"], rates["rate_date"],
+            strict=True,
+        )
+    }
 
 
 def load_fx_lookup(blob_service: BlobServiceClient) -> dict:
-    fx_container = blob_service.get_container_client("fxrates")
-    lookup = {}
-
-    hist_bytes = fx_container.download_blob("fx_rates_historical.csv").readall()
-    hist_df = pd.read_csv(io.BytesIO(hist_bytes))
-    for _, row in hist_df.iterrows():
-        key = (int(row["year"]), int(row["month"]), row["currency"])
-        lookup[key] = (float(row["rate_lcu_per_usd"]), f"{int(row['year'])}-{int(row['month']):02d}-01")
-
+    """Read both FX files from Blob Storage and build the lookup."""
+    container = blob_service.get_container_client(FX_CONTAINER)
+    historical = pd.read_csv(io.BytesIO(container.download_blob("fx_rates_historical.csv").readall()))
     try:
-        current_bytes = fx_container.download_blob("fx_rates_current.csv").readall()
-        current_df = pd.read_csv(io.BytesIO(current_bytes))
-        for _, row in current_df.iterrows():
-            key = (int(row["year"]), int(row["month"]), row["currency"])
-            lookup[key] = (float(row["rate_lcu_per_usd"]), str(row["fetched_date"]))
-    except Exception:
-        pass
-
-    return lookup
+        live = pd.read_csv(io.BytesIO(container.download_blob("fx_rates_current.csv").readall()))
+    except ResourceNotFoundError:
+        logging.info("fx_rates_current.csv not found - using historical rates only.")
+        live = None
+    return build_fx_lookup(historical, live)
 
 
-def clean_and_standardize(df: pd.DataFrame, fx_lookup: dict, source_file: str):
-    excluded_rows = []
+def clean_and_standardize(df: pd.DataFrame, fx_lookup: dict, source_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Deduplicate, validate, standardise units and convert prices to USD.
 
-    dedup_key = BUSINESS_KEY_COLS + ["mp_price", "cur_name"]
-    is_dup = df.duplicated(subset=dedup_key, keep="first")
-    for _, row in df[is_dup].iterrows():
-        rec = row.to_dict()
-        rec["reason"] = "duplicate on business key + price + currency - one copy kept"
-        rec["source_file"] = source_file
-        excluded_rows.append(rec)
-    df = df[~is_dup].copy()
+    Returns (clean_df, excluded_df). Every excluded row keeps its original columns plus a
+    reason, so nothing is dropped silently.
+    """
+    raw_cols = list(df.columns)
+    excluded = []
 
-    key_groups = df.groupby(BUSINESS_KEY_COLS)[["mp_price", "cur_name"]].nunique()
-    conflicting_keys = set(
-        key_groups[(key_groups["mp_price"] > 1) | (key_groups["cur_name"] > 1)].index
+    def exclude(frame: pd.DataFrame, mask: pd.Series, reason: str | pd.Series) -> pd.DataFrame:
+        if mask.any():
+            rows = frame.loc[mask, raw_cols].copy()
+            rows["reason"] = reason[mask] if isinstance(reason, pd.Series) else reason
+            rows["source_file"] = source_file
+            excluded.append(rows)
+        return frame.loc[~mask]
+
+    # 1. Identical on business key + price + currency: a true duplicate, keep one copy.
+    dup = df.duplicated(subset=BUSINESS_KEY_COLS + ["mp_price", "cur_name"], keep="first")
+    df = exclude(df, dup, "duplicate on business key + price + currency - one copy kept")
+
+    # 2. Same business key but a different price or currency: cannot be resolved automatically.
+    variants = df.groupby(BUSINESS_KEY_COLS, dropna=False)[["mp_price", "cur_name"]].transform("nunique")
+    conflict = (variants["mp_price"] > 1) | (variants["cur_name"] > 1)
+    df = exclude(df, conflict, "duplicate business key with conflicting price or currency - needs manual review")
+
+    # 3. Only positive prices are meaningful (this also catches missing prices).
+    df = exclude(df, ~(df["mp_price"] > 0), "non-positive or missing price")
+
+    # 4. Units: price per KG, L or Unit.
+    category = df["um_name"].map({unit: cat for unit, (cat, _) in UNIT_MAP.items()})
+    factor = df["um_name"].map({unit: f for unit, (_, f) in UNIT_MAP.items()})
+    unknown = category.isna()
+    df = exclude(df, unknown, "unknown unit '" + df["um_name"].astype(str) + "' - no conversion mapping")
+    df = df.assign(unit_category_calc=category, price_per_std_unit_calc=df["mp_price"] / factor)
+
+    # 5. Currency: the rate of the observation's own month.
+    fx = pd.DataFrame(
+        [(y, m, c, rate, date) for (y, m, c), (rate, date) in fx_lookup.items()],
+        columns=["mp_year", "mp_month", "cur_name", "fx_rate_calc", "fx_rate_date_calc"],
     )
+    df = df.merge(fx, on=["mp_year", "mp_month", "cur_name"], how="left")
+    month = df["mp_month"].map(lambda m: f"{int(m):02d}" if pd.notna(m) else "??").astype(str)
+    period = df["mp_year"].astype(str) + "-" + month
+    df = exclude(df, df["fx_rate_calc"].isna(), "no FX rate available for " + df["cur_name"].astype(str) + " " + period)
 
-    def is_conflicting(row):
-        return tuple(row[c] for c in BUSINESS_KEY_COLS) in conflicting_keys
+    clean = df.assign(
+        mp_month=df["mp_month"].astype(int),
+        mp_year=df["mp_year"].astype(int),
+        mp_price=df["mp_price"].astype(float),
+        price_usd_calc=df["price_per_std_unit_calc"] / df["fx_rate_calc"],
+        source_file=source_file,
+    )[CLEAN_COLS].reset_index(drop=True)
 
-    conflict_mask = df.apply(is_conflicting, axis=1)
-    for _, row in df[conflict_mask].iterrows():
-        rec = row.to_dict()
-        rec["reason"] = "duplicate business key with conflicting price or currency - needs manual review"
-        rec["source_file"] = source_file
-        excluded_rows.append(rec)
-    df = df[~conflict_mask].copy()
+    excluded_df = (
+        pd.concat(excluded, ignore_index=True) if excluded
+        else pd.DataFrame(columns=raw_cols + ["reason", "source_file"])
+    )
+    return clean, excluded_df
 
-    clean_rows = []
-    for _, row in df.iterrows():
-        um = row["um_name"]
-        if um not in UNIT_MAP:
-            rec = row.to_dict()
-            rec["reason"] = f"unknown unit '{um}' - no conversion mapping"
-            rec["source_file"] = source_file
-            excluded_rows.append(rec)
-            continue
 
-        unit_category, kg_factor = UNIT_MAP[um]
-        price_per_std_unit = row["mp_price"] / kg_factor
-
-        fx_key = (int(row["mp_year"]), int(row["mp_month"]), row["cur_name"])
-        fx = fx_lookup.get(fx_key)
-        if fx is None:
-            rec = row.to_dict()
-            rec["reason"] = f"no FX rate available for {row['cur_name']} {row['mp_year']}-{int(row['mp_month']):02d}"
-            rec["source_file"] = source_file
-            excluded_rows.append(rec)
-            continue
-
-        fx_rate, fx_date = fx
-        price_usd = price_per_std_unit / fx_rate
-
-        clean_rows.append({
-            "adm0_name": row["adm0_name"],
-            "adm1_name": row.get("adm1_name"),
-            "mkt_name": row["mkt_name"],
-            "cm_name": row["cm_name"],
-            "cur_name": row["cur_name"],
-            "pt_name": row["pt_name"],
-            "mp_month": int(row["mp_month"]),
-            "mp_year": int(row["mp_year"]),
-            "mp_price": float(row["mp_price"]),
-            "um_name": um,
-            "unit_category_calc": unit_category,
-            "price_per_std_unit_calc": price_per_std_unit,
-            "fx_rate_calc": fx_rate,
-            "fx_rate_date_calc": fx_date,
-            "price_usd_calc": price_usd,
-            "source_file": source_file,
-        })
-
-    clean_df = pd.DataFrame(clean_rows)
-    excluded_df = pd.DataFrame(excluded_rows)
-    return clean_df, excluded_df
+def _sql_rows(frame: pd.DataFrame, columns: list[str]) -> list[tuple]:
+    """DataFrame -> tuples of plain Python values for executemany; missing values become NULL."""
+    values = frame.reindex(columns=columns).astype(object)
+    return list(values.where(values.notna(), None).itertuples(index=False, name=None))
 
 
 def write_to_sql(clean_df: pd.DataFrame, excluded_df: pd.DataFrame) -> None:
-    conn = connect_with_retry(autocommit=False, max_attempts=5, delay_seconds=12)
+    """Full refresh in one transaction: TRUNCATE + INSERT, committed only at the end.
+    Any failure rolls everything back, so the last good dataset stays untouched."""
+    conn = connect_with_retry(autocommit=False)
     cursor = conn.cursor()
-
     try:
         cursor.execute("TRUNCATE TABLE price_clean")
         cursor.execute("TRUNCATE TABLE excluded_records")
-
         if not clean_df.empty:
-            clean_params = [
-                (
-                    row["adm0_name"], row["adm1_name"], row["mkt_name"], row["cm_name"],
-                    row["cur_name"], row["pt_name"], row["mp_month"], row["mp_year"],
-                    row["mp_price"], row["um_name"], row["unit_category_calc"],
-                    row["price_per_std_unit_calc"], row["fx_rate_calc"], row["fx_rate_date_calc"],
-                    row["price_usd_calc"], row["source_file"],
-                )
-                for _, row in clean_df.iterrows()
-            ]
-            cursor.executemany(
-                """
-                INSERT INTO price_clean
-                    (adm0_name, adm1_name, mkt_name, cm_name, cur_name, pt_name,
-                     mp_month, mp_year, mp_price, um_name, unit_category_calc,
-                     price_per_std_unit_calc, fx_rate_calc, fx_rate_date_calc,
-                     price_usd_calc, source_file)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                clean_params,
-            )
-
+            cursor.executemany(INSERT_CLEAN_SQL, _sql_rows(clean_df, CLEAN_COLS))
         if not excluded_df.empty:
-            excluded_params = [
-                (
-                    row.get("adm0_name"), row.get("adm1_name"), row.get("mkt_name"), row.get("cm_name"),
-                    row.get("cur_name"), row.get("pt_name"), row.get("mp_month"), row.get("mp_year"),
-                    row.get("mp_price"), row.get("um_name"), row["reason"], row["source_file"],
-                )
-                for _, row in excluded_df.iterrows()
-            ]
-            cursor.executemany(
-                """
-                INSERT INTO excluded_records
-                    (adm0_name, adm1_name, mkt_name, cm_name, cur_name, pt_name,
-                     mp_month, mp_year, mp_price, um_name, reason, source_file)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                excluded_params,
-            )
-
+            cursor.executemany(INSERT_EXCLUDED_SQL, _sql_rows(excluded_df, EXCLUDED_COLS))
         conn.commit()
-        logging.info(f"SQL write committed: {len(clean_df)} clean rows, {len(excluded_df)} excluded rows.")
-
+        logging.info("SQL write committed: %d clean rows, %d excluded rows.", len(clean_df), len(excluded_df))
     except Exception:
         conn.rollback()
-        logging.exception("SQL write failed - rolled back, previous month's data preserved untouched.")
+        logging.exception("SQL write failed - rolled back, previous data preserved.")
         raise
-
     finally:
         conn.close()
 
 
 @app.route(route="clean_pipeline", auth_level=func.AuthLevel.FUNCTION)
 def clean_pipeline(req: func.HttpRequest) -> func.HttpResponse:
+    """HTTP entry point, called by Data Factory once the raw file is in Blob Storage."""
     logging.info("clean_pipeline triggered.")
     try:
         wake_up_sql()
-
-        conn_str = os.environ["STORAGE_CONNECTION_STRING"]
-        blob_service = BlobServiceClient.from_connection_string(conn_str)
-
+        blob_service = BlobServiceClient.from_connection_string(os.environ["STORAGE_CONNECTION_STRING"])
         update_fx_current(blob_service)
 
-        raw_container = blob_service.get_container_client("raw")
-        pattern = re.compile(r"^global_\d{8}\.csv$")
-        blobs = [b for b in raw_container.list_blobs(name_starts_with="global_") if pattern.match(b.name)]
+        raw_container = blob_service.get_container_client(RAW_CONTAINER)
+        blobs = [b for b in raw_container.list_blobs(name_starts_with="global_") if RAW_FILE_PATTERN.match(b.name)]
         if not blobs:
-            return func.HttpResponse("No file matching pattern 'global_YYYYMMDD.csv' found in the 'raw' container.", status_code=404)
-        latest_blob = max(blobs, key=lambda b: b.last_modified)
-        logging.info(f"Reading raw file: {latest_blob.name}")
+            return func.HttpResponse("No file matching 'global_YYYYMMDD.csv' in the raw container.", status_code=404)
+        latest = max(blobs, key=lambda b: b.last_modified)
+        logging.info("Reading raw file: %s", latest.name)
 
-        raw_bytes = raw_container.download_blob(latest_blob.name).readall()
-        df = pd.read_csv(io.BytesIO(raw_bytes))
-        df = df[df["adm0_name"].isin(["Gambia", "Guinea-Bissau"])].copy()
+        raw = pd.read_csv(io.BytesIO(raw_container.download_blob(latest.name).readall()), low_memory=False)
+        df = raw[raw["adm0_name"].isin(TARGET_COUNTRIES)].copy()
 
-        date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
-        filtered_container = blob_service.get_container_client("filtered")
-        buf = io.StringIO()
-        df.to_csv(buf, index=False)
-        filtered_blob_name = f"gm_gb_filtered_{date_str}.csv"
-        filtered_container.upload_blob(name=filtered_blob_name, data=buf.getvalue(), overwrite=True)
-        logging.info(f"Written: {filtered_blob_name} ({len(df)} rows)")
+        filtered_name = f"gm_gb_filtered_{datetime.now(timezone.utc):%Y%m%d}.csv"
+        blob_service.get_container_client(FILTERED_CONTAINER).upload_blob(
+            name=filtered_name, data=df.to_csv(index=False), overwrite=True
+        )
+        logging.info("Written: %s (%d rows)", filtered_name, len(df))
 
-        fx_lookup = load_fx_lookup(blob_service)
-        clean_df, excluded_df = clean_and_standardize(df, fx_lookup, filtered_blob_name)
-
+        clean_df, excluded_df = clean_and_standardize(df, load_fx_lookup(blob_service), filtered_name)
         write_to_sql(clean_df, excluded_df)
 
         return func.HttpResponse(
-            f"OK. Source: {latest_blob.name}. Filtered: {len(df)} rows. "
-            f"Clean: {len(clean_df)} rows written to price_clean. "
-            f"Excluded: {len(excluded_df)} rows written to excluded_records.",
-            status_code=200
+            f"OK. Source: {latest.name}. Filtered: {len(df)} rows. "
+            f"Clean: {len(clean_df)} rows. Excluded: {len(excluded_df)} rows.",
+            status_code=200,
         )
-    except Exception as e:
+    except Exception:
         logging.exception("clean_pipeline failed")
-        return func.HttpResponse(f"ERROR: {type(e).__name__}: {str(e)}", status_code=500)
+        return func.HttpResponse("Pipeline failed - see the function logs for details.", status_code=500)

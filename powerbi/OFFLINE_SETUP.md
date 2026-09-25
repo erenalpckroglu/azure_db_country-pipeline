@@ -24,8 +24,9 @@ Source = Parquet.Document(File.Contents("C:\path\to\repo\data\curated\price_clea
 
 1. Power BI Desktop -> Get data -> **Parquet** -> select `data/curated/price_clean.parquet` -> Load.
    Parquet keeps numbers and dates typed, so there are no decimal-separator problems on a non-English Windows locale.
-2. If you use the CSV instead: Get data -> Text/CSV -> Transform Data, then for every numeric and date column use
-   **Change Type -> Using Locale -> English (United States)**. Otherwise `1.55` can be read as `155`.
+2. If you load a CSV export instead (not included in the repository): Get data -> Text/CSV -> Transform Data, then for
+   every numeric and date column use **Change Type -> Using Locale -> English (United States)**. Otherwise `1.55` can be
+   read as `155`.
 3. Rename the query to `price_clean` (all formulas below use this name and the original column names).
 4. View -> Themes -> Browse for themes -> `powerbi/PriceWatch_theme.json`.
 
